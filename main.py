@@ -12,6 +12,7 @@ from pydicom.dataset import FileDataset
 from database import SessionLocal, engine
 import models, schemas, crud
 
+# Crear todas las tablas antes de iniciar la app
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="DICOMTROL API")
@@ -44,19 +45,16 @@ def ensure_dir(path: str):
 
 def dicom_to_pil(ds: FileDataset, frame_index: int = 0) -> Image.Image:
     try:
-        # multi-frame handling
         if hasattr(ds, "NumberOfFrames") and ds.NumberOfFrames and int(ds.NumberOfFrames) > 1:
             arr = ds.pixel_array[int(frame_index)]
         else:
             arr = ds.pixel_array
 
         arr = arr.astype(np.float32)
-
         slope = float(getattr(ds, "RescaleSlope", 1.0) or 1.0)
         intercept = float(getattr(ds, "RescaleIntercept", 0.0) or 0.0)
         arr = arr * slope + intercept
 
-        # windowing if available
         wc = safe_get(ds, "WindowCenter")
         ww = safe_get(ds, "WindowWidth")
         if isinstance(wc, (list, tuple)): wc = float(wc[0])
@@ -77,8 +75,7 @@ def dicom_to_pil(ds: FileDataset, frame_index: int = 0) -> Image.Image:
         if "MONOCHROME1" in photometric:
             arr = 255 - arr
 
-        img = Image.fromarray(arr)
-        return img
+        return Image.fromarray(arr)
     except Exception as e:
         arr = getattr(ds, "pixel_array", None)
         if arr is None:
@@ -141,7 +138,6 @@ async def _process_files(files: list[UploadFile], db: Session) -> schemas.Upload
             nframes = int(getattr(ds, "NumberOfFrames", 1) or 1)
             is_multiframe = nframes > 1
 
-            # rutas
             study_dir = os.path.join(UPLOAD_FOLDER, study_uid or f"study_{est.id}")
             series_dir = os.path.join(study_dir, series_uid or f"series_{ser.id}")
             ensure_dir(series_dir)
@@ -166,7 +162,6 @@ async def _process_files(files: list[UploadFile], db: Session) -> schemas.Upload
             imagenes_creadas += 1
 
         except Exception:
-            # no romper subida en lote; opcionalmente loggear
             pass
         finally:
             try:
@@ -187,13 +182,11 @@ async def _process_files(files: list[UploadFile], db: Session) -> schemas.Upload
 def listar_estudios(db: Session = Depends(get_db)):
     return crud.listar_estudios(db)
 
-# estudio detail (with series)
 @app.get("/estudios/{estudio_id}", response_model=schemas.EstudioDetail)
 def obtener_detalles_estudio(estudio_id: int, db: Session = Depends(get_db)):
     est = crud.obtener_estudio(db, estudio_id)
     if not est:
         raise HTTPException(status_code=404, detail="Estudio no encontrado")
-    # ensure series loaded
     _ = est.series
     return est
 
@@ -227,7 +220,6 @@ def marcar_visto(estudio_id: int, db: Session = Depends(get_db)):
     db.commit()
     return est
 
-# serve image by imagen_id (PNG). Accepts frame query param for multiframe
 @app.get("/imagen/{imagen_id}")
 def obtener_imagen(imagen_id: int, frame: int = Query(0, ge=0), db: Session = Depends(get_db)):
     img = db.query(models.Imagen).filter(models.Imagen.id == imagen_id).one_or_none()
@@ -247,3 +239,9 @@ def obtener_imagen(imagen_id: int, frame: int = Query(0, ge=0), db: Session = De
         return StreamingResponse(buf, media_type="image/png")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"No se pudo renderizar la imagen: {e}")
+
+# --- Render puerto dinámico ---
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
