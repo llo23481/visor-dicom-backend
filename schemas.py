@@ -1,4 +1,3 @@
-# schemas.py
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
@@ -10,7 +9,7 @@ class ImagenOut(BaseModel):
     is_multiframe: bool
     num_frames: int
     archivo: str
-    preview_base64: Optional[str] = None  # <- base64 PNG thumbnail
+    preview_base64: Optional[str] = None
 
     class Config:
         orm_mode = True

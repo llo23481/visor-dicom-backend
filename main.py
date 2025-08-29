@@ -1,4 +1,3 @@
-# main.py
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -45,16 +44,19 @@ def ensure_dir(path: str):
 
 def dicom_to_pil(ds: FileDataset, frame_index: int = 0) -> Image.Image:
     try:
+        # Multi-frame handling
         if hasattr(ds, "NumberOfFrames") and ds.NumberOfFrames and int(ds.NumberOfFrames) > 1:
             arr = ds.pixel_array[int(frame_index)]
         else:
             arr = ds.pixel_array
 
         arr = arr.astype(np.float32)
+
         slope = float(getattr(ds, "RescaleSlope", 1.0) or 1.0)
         intercept = float(getattr(ds, "RescaleIntercept", 0.0) or 0.0)
         arr = arr * slope + intercept
 
+        # windowing if available
         wc = safe_get(ds, "WindowCenter")
         ww = safe_get(ds, "WindowWidth")
         if isinstance(wc, (list, tuple)): wc = float(wc[0])
@@ -75,7 +77,8 @@ def dicom_to_pil(ds: FileDataset, frame_index: int = 0) -> Image.Image:
         if "MONOCHROME1" in photometric:
             arr = 255 - arr
 
-        return Image.fromarray(arr)
+        img = Image.fromarray(arr)
+        return img
     except Exception as e:
         arr = getattr(ds, "pixel_array", None)
         if arr is None:
@@ -149,6 +152,8 @@ async def _process_files(files: list[UploadFile], db: Session) -> schemas.Upload
             # --- generar preview PNG (miniatura) y guardarla en DB ---
             try:
                 preview_img = dicom_to_pil(ds, frame_index=0)
+                # redimensionar miniatura a máximo 240px (mantener proporción)
+                preview_img.thumbnail((240, 240), Image.LANCZOS)
                 buf = io.BytesIO()
                 preview_img.save(buf, format="PNG")
                 preview_bytes = buf.getvalue()
@@ -198,6 +203,7 @@ def obtener_detalles_estudio(estudio_id: int, db: Session = Depends(get_db)):
     est = crud.obtener_estudio(db, estudio_id)
     if not est:
         raise HTTPException(status_code=404, detail="Estudio no encontrado")
+    # ensure series loaded
     _ = est.series
     return est
 
@@ -256,25 +262,29 @@ def obtener_imagen(imagen_id: int, frame: int = Query(0, ge=0), db: Session = De
     if not img:
         raise HTTPException(status_code=404, detail="Imagen no encontrada")
 
-    # Si tenemos preview en DB, devolvemos esa miniatura (PNG)
+    # Si tenemos preview en DB y se pide frame 0, devolvemos esa miniatura (aunque para visor preferimos render final)
+    # Para el visor (imagen grande) intentamos renderizar el DICOM; si falla, devolvemos la preview.
+    ruta = img.ruta
+    # Intentar renderizar desde archivo si existe
+    if ruta and os.path.isfile(ruta):
+        try:
+            ds = dcmread(ruta, force=True)
+            total_frames = int(getattr(ds, "NumberOfFrames", 1) or 1)
+            fidx = max(0, min(frame, total_frames - 1))
+            im = dicom_to_pil(ds, frame_index=fidx)
+            # redimensionar a un tamaño razonable para web si es enorme (opcional)
+            buf = io.BytesIO()
+            im.save(buf, format="PNG")
+            buf.seek(0)
+            return StreamingResponse(buf, media_type="image/png")
+        except Exception:
+            # fallback a preview bytes
+            pass
+
     if img.imagen_preview:
         return StreamingResponse(io.BytesIO(img.imagen_preview), media_type="image/png")
 
-    # Fallback: intentar leer el archivo DICOM guardado en disco y renderizar
-    ruta = img.ruta
-    if not os.path.isfile(ruta):
-        raise HTTPException(status_code=404, detail="Archivo no encontrado")
-    try:
-        ds = dcmread(ruta, force=True)
-        total_frames = int(getattr(ds, "NumberOfFrames", 1) or 1)
-        fidx = max(0, min(frame, total_frames - 1))
-        im = dicom_to_pil(ds, frame_index=fidx)
-        buf = io.BytesIO()
-        im.save(buf, format="PNG")
-        buf.seek(0)
-        return StreamingResponse(buf, media_type="image/png")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"No se pudo renderizar la imagen: {e}")
+    raise HTTPException(status_code=404, detail="Archivo/preview no disponible")
 
 # --- Render puerto dinámico ---
 if __name__ == "__main__":
