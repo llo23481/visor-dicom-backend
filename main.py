@@ -3,7 +3,7 @@ from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-import os, io
+import os, io, base64
 import numpy as np
 from PIL import Image
 import pydicom
@@ -146,6 +146,15 @@ async def _process_files(files: list[UploadFile], db: Session) -> schemas.Upload
             with open(final_path, "wb") as f:
                 f.write(contenido)
 
+            # --- generar preview PNG (miniatura) y guardarla en DB ---
+            try:
+                preview_img = dicom_to_pil(ds, frame_index=0)
+                buf = io.BytesIO()
+                preview_img.save(buf, format="PNG")
+                preview_bytes = buf.getvalue()
+            except Exception:
+                preview_bytes = None
+
             img = crud.add_imagen(
                 db=db,
                 serie_id=ser.id,
@@ -154,7 +163,8 @@ async def _process_files(files: list[UploadFile], db: Session) -> schemas.Upload
                 is_multiframe=is_multiframe,
                 num_frames=nframes,
                 archivo=up.filename,
-                ruta=os.path.relpath(final_path, start=".")
+                ruta=os.path.relpath(final_path, start="."),
+                preview_bytes=preview_bytes
             )
 
             ser.num_imagenes = (ser.num_imagenes or 0) + 1
@@ -162,6 +172,7 @@ async def _process_files(files: list[UploadFile], db: Session) -> schemas.Upload
             imagenes_creadas += 1
 
         except Exception:
+            # no romper subida en lote; opcionalmente loggear
             pass
         finally:
             try:
@@ -205,12 +216,31 @@ def obtener_detalle_serie(serie_id: int, db: Session = Depends(get_db)):
     _ = s.imagenes
     return s
 
+# listar imágenes: devolvemos preview_base64 para que el frontend las muestre inmediatamente
 @app.get("/series/{serie_id}/imagenes", response_model=list[schemas.ImagenOut])
 def listar_imagenes(serie_id: int, db: Session = Depends(get_db)):
     s = crud.obtener_serie(db, serie_id)
     if not s:
         raise HTTPException(status_code=404, detail="Serie no encontrada")
-    return crud.listar_imagenes_de_serie(db, serie_id)
+    imagenes = crud.listar_imagenes_de_serie(db, serie_id)
+    out = []
+    for img in imagenes:
+        preview_b64 = None
+        if img.imagen_preview:
+            try:
+                preview_b64 = base64.b64encode(img.imagen_preview).decode("utf-8")
+            except Exception:
+                preview_b64 = None
+        out.append({
+            "id": img.id,
+            "sop_instance_uid": img.sop_instance_uid,
+            "instance_number": img.instance_number,
+            "is_multiframe": img.is_multiframe,
+            "num_frames": img.num_frames,
+            "archivo": img.archivo,
+            "preview_base64": preview_b64
+        })
+    return out
 
 @app.put("/estudios/{estudio_id}/visto", response_model=schemas.EstudioOut)
 def marcar_visto(estudio_id: int, db: Session = Depends(get_db)):
@@ -225,6 +255,12 @@ def obtener_imagen(imagen_id: int, frame: int = Query(0, ge=0), db: Session = De
     img = db.query(models.Imagen).filter(models.Imagen.id == imagen_id).one_or_none()
     if not img:
         raise HTTPException(status_code=404, detail="Imagen no encontrada")
+
+    # Si tenemos preview en DB, devolvemos esa miniatura (PNG)
+    if img.imagen_preview:
+        return StreamingResponse(io.BytesIO(img.imagen_preview), media_type="image/png")
+
+    # Fallback: intentar leer el archivo DICOM guardado en disco y renderizar
     ruta = img.ruta
     if not os.path.isfile(ruta):
         raise HTTPException(status_code=404, detail="Archivo no encontrado")

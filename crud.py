@@ -54,7 +54,7 @@ def obtener_serie(db: Session, serie_id: int) -> Optional[models.Serie]:
 
 # ===== Imagen =====
 def add_imagen(db: Session, serie_id: int, sop_uid: Optional[str], instance_number: Optional[int],
-               is_multiframe: bool, num_frames: int, archivo: str, ruta: str) -> models.Imagen:
+               is_multiframe: bool, num_frames: int, archivo: str, ruta: str, preview_bytes: Optional[bytes] = None) -> models.Imagen:
     # evitar duplicados por SOP UID
     img = None
     if sop_uid:
@@ -63,6 +63,10 @@ def add_imagen(db: Session, serie_id: int, sop_uid: Optional[str], instance_numb
             models.Imagen.sop_instance_uid == sop_uid
         ).one_or_none()
     if img:
+        # si existe y no tiene preview y llega una, actualizarla
+        if preview_bytes and not img.imagen_preview:
+            img.imagen_preview = preview_bytes
+            db.flush()
         return img
     img = models.Imagen(
         serie_id=serie_id,
@@ -71,7 +75,8 @@ def add_imagen(db: Session, serie_id: int, sop_uid: Optional[str], instance_numb
         is_multiframe=is_multiframe,
         num_frames=num_frames,
         archivo=archivo,
-        ruta=ruta
+        ruta=ruta,
+        imagen_preview=preview_bytes
     )
     db.add(img)
     db.flush()

@@ -1,5 +1,5 @@
 # models.py
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, UniqueConstraint, LargeBinary
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from database import Base
@@ -62,6 +62,8 @@ class Imagen(Base):
 
     archivo = Column(String, nullable=False)  # nombre de archivo
     ruta = Column(String, nullable=False)     # ruta relativa al archivo guardado
+
+    imagen_preview = Column(LargeBinary, nullable=True)  # <-- guardamos miniatura PNG
 
     serie = relationship("Serie", back_populates="imagenes")
 
