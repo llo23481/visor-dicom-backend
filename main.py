@@ -122,10 +122,16 @@ async def _process_files(files: list[UploadFile], db: Session) -> schemas.Upload
             body_part = str(safe_get(ds, "BodyPartExamined", "") or "")
             medico = str(safe_get(ds, "ReferringPhysicianName", "") or "")
 
+            # --- Nacimiento en formato DD-MM-YYYY ---
+            raw_birth = str(safe_get(ds, "PatientBirthDate", "") or "")
+            nacimiento_fmt = ""
+            if len(raw_birth) == 8:  # YYYYMMDD
+                nacimiento_fmt = f"{raw_birth[6:8]}-{raw_birth[4:6]}-{raw_birth[0:4]}"
+
             est_defaults = dict(
                 nombre=str(safe_get(ds, "PatientName", "") or ""),
                 paciente_id=str(safe_get(ds, "PatientID", "") or ""),
-                nacimiento=str(safe_get(ds, "PatientBirthDate", "") or ""),
+                nacimiento=nacimiento_fmt,
                 descripcion=str(safe_get(ds, "StudyDescription", "") or ""),
                 fecha=str(safe_get(ds, "StudyDate", "") or ""),
                 institucion=str(safe_get(ds, "InstitutionName", "") or ""),
@@ -154,7 +160,6 @@ async def _process_files(files: list[UploadFile], db: Session) -> schemas.Upload
             # --- generar preview PNG (miniatura) y guardarla en DB ---
             try:
                 preview_img = dicom_to_pil(ds, frame_index=0)
-                # redimensionar miniatura a máximo 240px (mantener proporción)
                 preview_img.thumbnail((240, 240), Image.LANCZOS)
                 buf = io.BytesIO()
                 preview_img.save(buf, format="PNG")
@@ -179,7 +184,6 @@ async def _process_files(files: list[UploadFile], db: Session) -> schemas.Upload
             imagenes_creadas += 1
 
         except Exception:
-            # no romper subida en lote; opcionalmente loggear
             pass
         finally:
             try:
@@ -205,7 +209,6 @@ def obtener_detalles_estudio(estudio_id: int, db: Session = Depends(get_db)):
     est = crud.obtener_estudio(db, estudio_id)
     if not est:
         raise HTTPException(status_code=404, detail="Estudio no encontrado")
-    # ensure series loaded
     _ = est.series
     return est
 
@@ -224,7 +227,6 @@ def obtener_detalle_serie(serie_id: int, db: Session = Depends(get_db)):
     _ = s.imagenes
     return s
 
-# listar imágenes: devolvemos preview_base64 para que el frontend las muestre inmediatamente
 @app.get("/series/{serie_id}/imagenes", response_model=list[schemas.ImagenOut])
 def listar_imagenes(serie_id: int, db: Session = Depends(get_db)):
     s = crud.obtener_serie(db, serie_id)
