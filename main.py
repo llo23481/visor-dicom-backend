@@ -1,8 +1,8 @@
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from sqlalchemy.orm import Session
-import os, io, base64
+import os, io, base64, zipfile
 import numpy as np
 from PIL import Image
 import pydicom
@@ -30,7 +30,9 @@ def get_db():
         db.close()
 
 UPLOAD_FOLDER = "subidos"
+EXPORT_FOLDER = "exports"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(EXPORT_FOLDER, exist_ok=True)
 
 # utils
 def safe_get(ds: FileDataset, key: str, default=None):
@@ -262,29 +264,42 @@ def obtener_imagen(imagen_id: int, frame: int = Query(0, ge=0), db: Session = De
     if not img:
         raise HTTPException(status_code=404, detail="Imagen no encontrada")
 
-    # Si tenemos preview en DB y se pide frame 0, devolvemos esa miniatura (aunque para visor preferimos render final)
-    # Para el visor (imagen grande) intentamos renderizar el DICOM; si falla, devolvemos la preview.
     ruta = img.ruta
-    # Intentar renderizar desde archivo si existe
     if ruta and os.path.isfile(ruta):
         try:
             ds = dcmread(ruta, force=True)
             total_frames = int(getattr(ds, "NumberOfFrames", 1) or 1)
             fidx = max(0, min(frame, total_frames - 1))
             im = dicom_to_pil(ds, frame_index=fidx)
-            # redimensionar a un tamaño razonable para web si es enorme (opcional)
             buf = io.BytesIO()
             im.save(buf, format="PNG")
             buf.seek(0)
             return StreamingResponse(buf, media_type="image/png")
         except Exception:
-            # fallback a preview bytes
             pass
 
     if img.imagen_preview:
         return StreamingResponse(io.BytesIO(img.imagen_preview), media_type="image/png")
 
     raise HTTPException(status_code=404, detail="Archivo/preview no disponible")
+
+# --- NUEVO ENDPOINT EXPORTAR ---
+@app.get("/exportar")
+def exportar():
+    """
+    Genera un ZIP de exportación (ejemplo).
+    Más adelante aquí se conectará la lógica real de exportar estudios.
+    """
+    zip_path = os.path.join(EXPORT_FOLDER, "dicomtrol_export.zip")
+    with zipfile.ZipFile(zip_path, "w") as zipf:
+        zipf.writestr("informe.txt", "Exportación generada desde DICOMTROL ✅")
+        zipf.writestr("datos.json", '{"paciente": "John Doe", "ID": "12345"}')
+
+    return FileResponse(
+        path=zip_path,
+        filename="dicomtrol_export.zip",
+        media_type="application/zip"
+    )
 
 # --- Render puerto dinámico ---
 if __name__ == "__main__":
