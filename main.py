@@ -46,7 +46,6 @@ def ensure_dir(path: str):
 
 def dicom_to_pil(ds: FileDataset, frame_index: int = 0) -> Image.Image:
     try:
-        # Multi-frame handling
         if hasattr(ds, "NumberOfFrames") and ds.NumberOfFrames and int(ds.NumberOfFrames) > 1:
             arr = ds.pixel_array[int(frame_index)]
         else:
@@ -58,7 +57,6 @@ def dicom_to_pil(ds: FileDataset, frame_index: int = 0) -> Image.Image:
         intercept = float(getattr(ds, "RescaleIntercept", 0.0) or 0.0)
         arr = arr * slope + intercept
 
-        # windowing if available
         wc = safe_get(ds, "WindowCenter")
         ww = safe_get(ds, "WindowWidth")
         if isinstance(wc, (list, tuple)): wc = float(wc[0])
@@ -122,10 +120,9 @@ async def _process_files(files: list[UploadFile], db: Session) -> schemas.Upload
             body_part = str(safe_get(ds, "BodyPartExamined", "") or "")
             medico = str(safe_get(ds, "ReferringPhysicianName", "") or "")
 
-            # --- Nacimiento en formato DD-MM-YYYY ---
             raw_birth = str(safe_get(ds, "PatientBirthDate", "") or "")
             nacimiento_fmt = ""
-            if len(raw_birth) == 8:  # YYYYMMDD
+            if len(raw_birth) == 8:
                 nacimiento_fmt = f"{raw_birth[6:8]}-{raw_birth[4:6]}-{raw_birth[0:4]}"
 
             est_defaults = dict(
@@ -157,7 +154,6 @@ async def _process_files(files: list[UploadFile], db: Session) -> schemas.Upload
             with open(final_path, "wb") as f:
                 f.write(contenido)
 
-            # --- generar preview PNG (miniatura) y guardarla en DB ---
             try:
                 preview_img = dicom_to_pil(ds, frame_index=0)
                 preview_img.thumbnail((240, 240), Image.LANCZOS)
@@ -285,13 +281,22 @@ def obtener_imagen(imagen_id: int, frame: int = Query(0, ge=0), db: Session = De
 
     raise HTTPException(status_code=404, detail="Archivo/preview no disponible")
 
+# --- NUEVO ENDPOINT: Descargar el archivo DICOM original ---
+@app.get("/archivo-dicom/{imagen_id}")
+def descargar_archivo_dicom(imagen_id: int, db: Session = Depends(get_db)):
+    img = db.query(models.Imagen).filter(models.Imagen.id == imagen_id).one_or_none()
+    if not img:
+        raise HTTPException(status_code=404, detail="Imagen no encontrada")
+
+    ruta = img.ruta
+    if ruta and os.path.isfile(ruta):
+        return FileResponse(ruta, media_type="application/dicom", filename=os.path.basename(ruta))
+
+    raise HTTPException(status_code=404, detail="Archivo DICOM no disponible")
+
 # --- NUEVO ENDPOINT EXPORTAR ---
 @app.get("/exportar")
 def exportar():
-    """
-    Genera un ZIP de exportación (ejemplo).
-    Más adelante aquí se conectará la lógica real de exportar estudios.
-    """
     zip_path = os.path.join(EXPORT_FOLDER, "dicomtrol_export.zip")
     with zipfile.ZipFile(zip_path, "w") as zipf:
         zipf.writestr("informe.txt", "Exportación generada desde DICOMTROL ✅")
