@@ -307,7 +307,55 @@ def exportar():
         filename="dicomtrol_export.zip",
         media_type="application/zip"
     )
+@app.get("/exportar/{estudio_id}")
+def exportar_estudio(estudio_id: int, db: Session = Depends(get_db)):
+    est = crud.obtener_estudio(db, estudio_id)
+    if not est:
+        raise HTTPException(status_code=404, detail="Estudio no encontrado")
 
+    zip_path = os.path.join(EXPORT_FOLDER, f"estudio_{estudio_id}.zip")
+    with zipfile.ZipFile(zip_path, "w") as zipf:
+        # Añadir imágenes DICOM
+        for serie in est.series:
+            for img in serie.imagenes:
+                if img.ruta and os.path.isfile(img.ruta):
+                    zipf.write(img.ruta, arcname=os.path.basename(img.ruta))
+
+        # Añadir informes (si existen)
+        informes_dir = os.path.join("informes", str(estudio_id))
+        if os.path.isdir(informes_dir):
+            for fname in os.listdir(informes_dir):
+                fpath = os.path.join(informes_dir, fname)
+                if os.path.isfile(fpath):
+                    zipf.write(fpath, arcname=f"informes/{fname}")
+
+    return FileResponse(
+        path=zip_path,
+        filename=f"estudio_{estudio_id}.zip",
+        media_type="application/zip"
+    )
+@app.post("/importar_informe/{estudio_id}")
+async def importar_informe(estudio_id: int, informe: UploadFile = File(...)):
+    informes_dir = os.path.join("informes", str(estudio_id))
+    ensure_dir(informes_dir)
+
+    filename = os.path.join(informes_dir, informe.filename)
+    with open(filename, "wb") as f:
+        f.write(await informe.read())
+
+    return {"filename": filename, "msg": "Informe importado correctamente ✅"}
+@app.get("/informes/{estudio_id}")
+def listar_informes(estudio_id: int):
+    informes_dir = os.path.join("informes", str(estudio_id))
+    if not os.path.isdir(informes_dir):
+        return []
+    return os.listdir(informes_dir)
+@app.get("/informes/{estudio_id}/{filename}")
+def descargar_informe(estudio_id: int, filename: str):
+    fpath = os.path.join("informes", str(estudio_id), filename)
+    if not os.path.isfile(fpath):
+        raise HTTPException(status_code=404, detail="Informe no encontrado")
+    return FileResponse(fpath, filename=filename)
 # --- Render puerto dinámico ---
 if __name__ == "__main__":
     import uvicorn
