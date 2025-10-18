@@ -19,8 +19,8 @@ def get_or_create_estudio(db: Session, study_uid: Optional[str], defaults: dict)
     db.flush()
     return est
 
-def listar_estudios(db: Session):
-    return db.query(models.Estudio).order_by(models.Estudio.created_at.desc()).all()
+def listar_estudios(db: Session, skip: int = 0, limit: int = 50):
+    return db.query(models.Estudio).order_by(models.Estudio.id.desc()).offset(skip).limit(limit).all()
 
 def obtener_estudio(db: Session, estudio_id: int) -> Optional[models.Estudio]:
     return db.query(models.Estudio).filter(models.Estudio.id == estudio_id).one_or_none()

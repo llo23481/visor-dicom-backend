@@ -197,8 +197,12 @@ async def _process_files(files: list[UploadFile], db: Session) -> schemas.Upload
 
 # list studies
 @app.get("/estudios", response_model=list[schemas.EstudioOut])
-def listar_estudios(db: Session = Depends(get_db)):
-    return crud.listar_estudios(db)
+def listar_estudios(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db)
+):
+    return crud.listar_estudios(db, skip=skip, limit=limit)
 
 @app.get("/estudios/{estudio_id}", response_model=schemas.EstudioDetail)
 def obtener_detalles_estudio(estudio_id: int, db: Session = Depends(get_db)):
