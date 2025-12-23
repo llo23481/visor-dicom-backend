@@ -46,10 +46,17 @@ def ensure_dir(path: str):
 
 def dicom_to_pil(ds: FileDataset, frame_index: int = 0) -> Image.Image:
     try:
+        # Intentar obtener pixel_array
+        if not hasattr(ds, 'pixel_array'):
+            # Forzar lectura solo si no está cargado
+            ds.decompress()  # si hay compresión soportada
         if hasattr(ds, "NumberOfFrames") and ds.NumberOfFrames and int(ds.NumberOfFrames) > 1:
             arr = ds.pixel_array[int(frame_index)]
         else:
             arr = ds.pixel_array
+
+        if arr is None or arr.size == 0:
+            raise ValueError("Empty pixel array")
 
         arr = arr.astype(np.float32)
 
@@ -77,16 +84,15 @@ def dicom_to_pil(ds: FileDataset, frame_index: int = 0) -> Image.Image:
         if "MONOCHROME1" in photometric:
             arr = 255 - arr
 
-        img = Image.fromarray(arr)
-        return img
-    except Exception as e:
-        arr = getattr(ds, "pixel_array", None)
-        if arr is None:
-            raise e
-        arr = arr.astype(np.float32)
-        arr = (arr - arr.min()) / (arr.max() - arr.min() + 1e-6)
-        arr = (arr * 255.0).astype(np.uint8)
         return Image.fromarray(arr)
+
+    except Exception as e:
+        # Si falla cualquier cosa, generamos una imagen placeholder
+        print(f"[dicom_to_pil fallback] Error: {e}")
+        placeholder = Image.new('RGB', (240, 240), color=(200, 200, 200))
+        draw = ImageDraw.Draw(placeholder)
+        draw.text((10, 110), "Preview no disponible", fill=(0, 0, 0))
+        return placeholder
 
 # upload single
 @app.post("/subir", response_model=schemas.UploadResult)
