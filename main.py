@@ -2,7 +2,7 @@ from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from sqlalchemy.orm import Session
-import os, io, base64, zipfile
+import os, io, base64, zipfile, uuid
 import numpy as np
 from PIL import Image
 import pydicom
@@ -112,9 +112,18 @@ async def _process_files(files: list[UploadFile], db: Session) -> schemas.Upload
         try:
             ds: FileDataset = dcmread(tmp_path, force=True)
 
-            study_uid = str(safe_get(ds, "StudyInstanceUID", "") or "")
-            series_uid = str(safe_get(ds, "SeriesInstanceUID", "") or "")
-            sop_uid = str(safe_get(ds, "SOPInstanceUID", "") or "")
+            study_uid = str(safe_get(ds, "StudyInstanceUID", "") or "").strip()
+            series_uid = str(safe_get(ds, "SeriesInstanceUID", "") or "").strip()
+            sop_uid = str(safe_get(ds, "SOPInstanceUID", "") or "").strip()
+
+            # ✅ Generar UIDs temporales si están vacíos
+            if not study_uid:
+                study_uid = f"GEN-{uuid.uuid4()}"
+            if not series_uid:
+                series_uid = f"GEN-{uuid.uuid4()}"
+            if not sop_uid:
+                sop_uid = f"GEN-{uuid.uuid4()}"
+
             modality = str(safe_get(ds, "Modality", "") or "")
             series_desc = str(safe_get(ds, "SeriesDescription", "") or "")
             body_part = str(safe_get(ds, "BodyPartExamined", "") or "")
@@ -133,7 +142,7 @@ async def _process_files(files: list[UploadFile], db: Session) -> schemas.Upload
                 fecha=str(safe_get(ds, "StudyDate", "") or ""),
                 institucion=str(safe_get(ds, "InstitutionName", "") or ""),
             )
-            est = crud.get_or_create_estudio(db, study_uid or None, est_defaults)
+            est = crud.get_or_create_estudio(db, study_uid, est_defaults)
 
             ser_defaults = dict(
                 modality=modality,
@@ -141,32 +150,34 @@ async def _process_files(files: list[UploadFile], db: Session) -> schemas.Upload
                 body_part=body_part,
                 medico_remitente=medico,
             )
-            ser = crud.get_or_create_serie(db, est.id, series_uid or None, ser_defaults)
+            ser = crud.get_or_create_serie(db, est.id, series_uid, ser_defaults)
 
             nframes = int(getattr(ds, "NumberOfFrames", 1) or 1)
             is_multiframe = nframes > 1
 
-            study_dir = os.path.join(UPLOAD_FOLDER, study_uid or f"study_{est.id}")
-            series_dir = os.path.join(study_dir, series_uid or f"series_{ser.id}")
+            study_dir = os.path.join(UPLOAD_FOLDER, study_uid)
+            series_dir = os.path.join(study_dir, series_uid)
             ensure_dir(series_dir)
 
             final_path = os.path.join(series_dir, up.filename)
             with open(final_path, "wb") as f:
                 f.write(contenido)
 
+            # ✅ Preview: no debe bloquear el registro
+            preview_bytes = None
             try:
                 preview_img = dicom_to_pil(ds, frame_index=0)
                 preview_img.thumbnail((240, 240), Image.LANCZOS)
                 buf = io.BytesIO()
                 preview_img.save(buf, format="PNG")
                 preview_bytes = buf.getvalue()
-            except Exception:
-                preview_bytes = None
+            except Exception as e:
+                print(f"[Preview falló para {up.filename}]: {e}")
 
             img = crud.add_imagen(
                 db=db,
                 serie_id=ser.id,
-                sop_uid=sop_uid or None,
+                sop_uid=sop_uid,
                 instance_number=int(getattr(ds, "InstanceNumber", 0) or 0),
                 is_multiframe=is_multiframe,
                 num_frames=nframes,
@@ -179,8 +190,49 @@ async def _process_files(files: list[UploadFile], db: Session) -> schemas.Upload
             estudio_id_final = est.id
             imagenes_creadas += 1
 
-        except Exception:
-            pass
+        except Exception as e:
+            # ✅ Manejo seguro de errores: nunca descartar archivo
+            print(f"[ERROR procesando {up.filename}]: {e}")
+            est_defaults = dict(
+                nombre="Desconocido",
+                paciente_id="000000",
+                nacimiento="",
+                descripcion="Archivo DICOM no procesable",
+                fecha="00000000",
+                institucion="Desconocida",
+            )
+            est = crud.get_or_create_estudio(db, None, est_defaults)
+
+            ser_defaults = dict(
+                modality="OT",
+                series_description="Serie desconocida",
+                body_part="",
+                medico_remitente="",
+            )
+            # Usar UID fijo para agrupar fallidos
+            ser = crud.get_or_create_serie(db, est.id, "GENERIC_UNKNOWN_SERIES", ser_defaults)
+
+            study_dir = os.path.join(UPLOAD_FOLDER, f"study_{est.id}")
+            series_dir = os.path.join(study_dir, f"series_{ser.id}")
+            ensure_dir(series_dir)
+            final_path = os.path.join(series_dir, up.filename)
+            with open(final_path, "wb") as f:
+                f.write(contenido)
+
+            crud.add_imagen(
+                db=db,
+                serie_id=ser.id,
+                sop_uid=None,
+                instance_number=0,
+                is_multiframe=False,
+                num_frames=1,
+                archivo=up.filename,
+                ruta=os.path.relpath(final_path, start="."),
+                preview_bytes=None
+            )
+            estudio_id_final = est.id
+            imagenes_creadas += 1
+
         finally:
             try:
                 os.remove(tmp_path)
@@ -195,7 +247,8 @@ async def _process_files(files: list[UploadFile], db: Session) -> schemas.Upload
     series_creadas = len(crud.listar_series_de_estudio(db, estudio_id_final))
     return schemas.UploadResult(estudio_id=estudio_id_final, series_creadas=series_creadas, imagenes_creadas=imagenes_creadas)
 
-# list studies
+# === Endpoints existentes (sin cambios) ===
+
 @app.get("/estudios", response_model=list[schemas.EstudioOut])
 def listar_estudios(
     skip: int = Query(0, ge=0),
@@ -285,7 +338,6 @@ def obtener_imagen(imagen_id: int, frame: int = Query(0, ge=0), db: Session = De
 
     raise HTTPException(status_code=404, detail="Archivo/preview no disponible")
 
-# --- NUEVO ENDPOINT: Descargar el archivo DICOM original ---
 @app.get("/archivo-dicom/{imagen_id}")
 def descargar_archivo_dicom(imagen_id: int, db: Session = Depends(get_db)):
     img = db.query(models.Imagen).filter(models.Imagen.id == imagen_id).one_or_none()
@@ -298,7 +350,6 @@ def descargar_archivo_dicom(imagen_id: int, db: Session = Depends(get_db)):
 
     raise HTTPException(status_code=404, detail="Archivo DICOM no disponible")
 
-# --- NUEVO ENDPOINT EXPORTAR ---
 @app.get("/exportar")
 def exportar():
     zip_path = os.path.join(EXPORT_FOLDER, "dicomtrol_export.zip")
@@ -311,6 +362,7 @@ def exportar():
         filename="dicomtrol_export.zip",
         media_type="application/zip"
     )
+
 @app.get("/exportar/{estudio_id}")
 def exportar_estudio(estudio_id: int, db: Session = Depends(get_db)):
     est = crud.obtener_estudio(db, estudio_id)
@@ -319,13 +371,11 @@ def exportar_estudio(estudio_id: int, db: Session = Depends(get_db)):
 
     zip_path = os.path.join(EXPORT_FOLDER, f"estudio_{estudio_id}.zip")
     with zipfile.ZipFile(zip_path, "w") as zipf:
-        # Añadir imágenes DICOM
         for serie in est.series:
             for img in serie.imagenes:
                 if img.ruta and os.path.isfile(img.ruta):
                     zipf.write(img.ruta, arcname=os.path.basename(img.ruta))
 
-        # Añadir informes (si existen)
         informes_dir = os.path.join("informes", str(estudio_id))
         if os.path.isdir(informes_dir):
             for fname in os.listdir(informes_dir):
@@ -338,6 +388,7 @@ def exportar_estudio(estudio_id: int, db: Session = Depends(get_db)):
         filename=f"estudio_{estudio_id}.zip",
         media_type="application/zip"
     )
+
 @app.post("/importar_informe/{estudio_id}")
 async def importar_informe(estudio_id: int, informe: UploadFile = File(...)):
     informes_dir = os.path.join("informes", str(estudio_id))
@@ -348,18 +399,21 @@ async def importar_informe(estudio_id: int, informe: UploadFile = File(...)):
         f.write(await informe.read())
 
     return {"filename": filename, "msg": "Informe importado correctamente ✅"}
+
 @app.get("/informes/{estudio_id}")
 def listar_informes(estudio_id: int):
     informes_dir = os.path.join("informes", str(estudio_id))
     if not os.path.isdir(informes_dir):
         return []
     return os.listdir(informes_dir)
+
 @app.get("/informes/{estudio_id}/{filename}")
 def descargar_informe(estudio_id: int, filename: str):
     fpath = os.path.join("informes", str(estudio_id), filename)
     if not os.path.isfile(fpath):
         raise HTTPException(status_code=404, detail="Informe no encontrado")
     return FileResponse(fpath, filename=filename)
+
 # --- Render puerto dinámico ---
 if __name__ == "__main__":
     import uvicorn
