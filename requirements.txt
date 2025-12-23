@@ -6,3 +6,6 @@ pydicom
 pillow
 numpy
 python-multipart
+pylibjpeg
+pylibjpeg-libjpeg
+pylibjpeg-openjpeg
