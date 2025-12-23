@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 import os, io, base64, zipfile, uuid
 import numpy as np
 from PIL import Image
+from PIL import ImageDraw
 import pydicom
 from pydicom import dcmread
 from pydicom.dataset import FileDataset
