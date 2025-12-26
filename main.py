@@ -2,6 +2,7 @@ from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from sqlalchemy.orm import Session
+from PIL import ImageDraw
 import os, io, base64, zipfile, uuid
 import numpy as np
 from PIL import Image
@@ -47,10 +48,9 @@ def ensure_dir(path: str):
 
 def dicom_to_pil(ds: FileDataset, frame_index: int = 0) -> Image.Image:
     try:
-        # Intentar obtener pixel_array
-        if not hasattr(ds, 'pixel_array'):
-            # Forzar lectura solo si no está cargado
-            ds.decompress()  # si hay compresión soportada
+        # Intentar cargar pixel_array solo si existe
+        if 'PixelData' not in ds:
+            raise ValueError("No PixelData in DICOM")
         if hasattr(ds, "NumberOfFrames") and ds.NumberOfFrames and int(ds.NumberOfFrames) > 1:
             arr = ds.pixel_array[int(frame_index)]
         else:
@@ -61,26 +61,46 @@ def dicom_to_pil(ds: FileDataset, frame_index: int = 0) -> Image.Image:
 
         arr = arr.astype(np.float32)
 
-        slope = float(getattr(ds, "RescaleSlope", 1.0) or 1.0)
-        intercept = float(getattr(ds, "RescaleIntercept", 0.0) or 0.0)
+        # Manejar RescaleSlope/Intercept de forma segura
+        slope = getattr(ds, "RescaleSlope", 1.0)
+        intercept = getattr(ds, "RescaleIntercept", 0.0)
+        try:
+            slope = float(slope) if slope is not None else 1.0
+            intercept = float(intercept) if intercept is not None else 0.0
+        except (ValueError, TypeError):
+            slope, intercept = 1.0, 0.0
+
         arr = arr * slope + intercept
 
+        # Manejo seguro de Windowing
         wc = safe_get(ds, "WindowCenter")
         ww = safe_get(ds, "WindowWidth")
-        if isinstance(wc, (list, tuple)): wc = float(wc[0])
-        if isinstance(ww, (list, tuple)): ww = float(ww[0])
+        if isinstance(wc, (list, tuple)) and wc:
+            wc = float(wc[0]) if wc[0] is not None else None
+        if isinstance(ww, (list, tuple)) and ww:
+            ww = float(ww[0]) if ww[0] is not None else None
 
-        if wc is not None and ww:
+        if wc is not None and ww and ww > 0:
             low = wc - ww/2
             high = wc + ww/2
             arr = np.clip(arr, low, high)
         else:
-            low, high = np.percentile(arr, (1, 99))
-            arr = np.clip(arr, low, high)
+            # Usar percentiles solo si el array no es constante
+            if np.ptp(arr) > 0:
+                low, high = np.percentile(arr, (1, 99))
+                arr = np.clip(arr, low, high)
+            else:
+                arr = np.clip(arr, arr.min(), arr.max())
 
-        arr = (arr - arr.min()) / (arr.max() - arr.min() + 1e-6)
+        # Normalizar
+        arr_min, arr_max = arr.min(), arr.max()
+        if arr_max > arr_min:
+            arr = (arr - arr_min) / (arr_max - arr_min)
+        else:
+            arr = np.zeros_like(arr)
         arr = (arr * 255.0).astype(np.uint8)
 
+        # Inversión MONOCHROME1
         photometric = str(getattr(ds, "PhotometricInterpretation", "")).upper()
         if "MONOCHROME1" in photometric:
             arr = 255 - arr
@@ -88,9 +108,9 @@ def dicom_to_pil(ds: FileDataset, frame_index: int = 0) -> Image.Image:
         return Image.fromarray(arr)
 
     except Exception as e:
-        # Si falla cualquier cosa, generamos una imagen placeholder
-        print(f"[dicom_to_pil fallback] Error: {e}")
-        placeholder = Image.new('RGB', (240, 240), color=(200, 200, 200))
+        # Si falla, devolver una imagen placeholder
+        from PIL import ImageDraw
+        placeholder = Image.new('RGB', (240, 240), (200, 200, 200))
         draw = ImageDraw.Draw(placeholder)
         draw.text((10, 110), "Preview no disponible", fill=(0, 0, 0))
         return placeholder
@@ -173,13 +193,16 @@ async def _process_files(files: list[UploadFile], db: Session) -> schemas.Upload
             # ✅ Preview: no debe bloquear el registro
             preview_bytes = None
             try:
-                preview_img = dicom_to_pil(ds, frame_index=0)
-                preview_img.thumbnail((240, 240), Image.LANCZOS)
-                buf = io.BytesIO()
-                preview_img.save(buf, format="PNG")
-                preview_bytes = buf.getvalue()
+                # Solo intentar generar preview si el archivo tiene pixel_array
+                if hasattr(ds, 'pixel_array') or 'PixelData' in ds:
+                    preview_img = dicom_to_pil(ds, frame_index=0)
+                    preview_img.thumbnail((240, 240), Image.LANCZOS)
+                    buf = io.BytesIO()
+                    preview_img.save(buf, format="PNG")
+                    preview_bytes = buf.getvalue()
             except Exception as e:
-                print(f"[Preview falló para {up.filename}]: {e}")
+                print(f"[Preview falló, pero se guarda el DICOM]: {up.filename} - {e}")
+                preview_bytes = None  # Pero seguimos
 
             img = crud.add_imagen(
                 db=db,
