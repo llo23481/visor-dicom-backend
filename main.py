@@ -444,6 +444,19 @@ def descargar_informe(estudio_id: int, filename: str):
         raise HTTPException(status_code=404, detail="Informe no encontrado")
     return FileResponse(fpath, filename=filename)
 
+@app.post("/borrar-todo")
+def borrar_todo(db: Session = Depends(get_db)):
+    """Borra todos los estudios, series e imágenes de la base de datos."""
+    try:
+        db.query(models.Imagen).delete()
+        db.query(models.Serie).delete()
+        db.query(models.Estudio).delete()
+        db.commit()
+        return {"msg": "✅ Todos los estudios eliminados"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error al borrar: {e}")
+
 # --- Render puerto dinámico ---
 if __name__ == "__main__":
     import uvicorn
